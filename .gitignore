@@ -1,0 +1,24 @@
+# Secrets & Private Keys
+*.key
+*.jks
+*.keystore
+.env
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Temporary & Build Dirs
+build/
+dist/
+temp/
+*.tmp
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
+desktop.ini
