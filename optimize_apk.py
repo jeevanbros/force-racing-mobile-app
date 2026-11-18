@@ -35,6 +35,72 @@ def wrap_manifest_line(line_str: str) -> bytes:
     return bytes(out)
 
 
+def patch_manifest(data: bytes) -> bytes:
+    """
+    Patch binary AndroidManifest.xml:
+    1. Update minSdkVersion to 21 (API 21: Android 5.0 Lollipop through Android 15+)
+    2. Ensure targetSdkVersion is 34 (API 34: Android 14/15)
+    3. Update unused permission to android.permission.ACCESS_NETWORK_STATE
+    4. Set usesCleartextTraffic="false" (0) for strict modern Android HTTPS compliance
+    """
+    manifest = bytearray(data)
+    header_size = 8
+    sp_type, sp_hsize, sp_size = struct.unpack_from('<HHI', manifest, header_size)
+    string_count, style_count, flags, strings_start, styles_start = struct.unpack_from('<IIIII', manifest, header_size + 8)
+    offsets = [struct.unpack_from('<I', manifest, header_size + 28 + i * 4)[0] for i in range(string_count)]
+    strings_data_start = header_size + strings_start
+
+    decoded = []
+    for off in offsets:
+        p = strings_data_start + off
+        l = struct.unpack_from('<H', manifest, p)[0]
+        s = manifest[p+2:p+2+l*2].decode('utf-16le', errors='replace')
+        decoded.append(s)
+
+    # 1. Replace permission string (ACCESS_ALL_DOWNLOADS) with ACCESS_NETWORK_STATE
+    for i, s in enumerate(decoded):
+        if s == 'android.permission.ACCESS_ALL_DOWNLOADS':
+            decoded[i] = 'android.permission.ACCESS_NETWORK_STATE'
+            break
+
+    # Rebuild string pool (UTF-16LE, flags=0)
+    new_offsets = []
+    new_strings_data = bytearray()
+    for s in decoded:
+        new_offsets.append(len(new_strings_data))
+        encoded = s.encode('utf-16le')
+        new_strings_data.extend(struct.pack('<H', len(s)))
+        new_strings_data.extend(encoded)
+        new_strings_data.extend(b'\x00\x00')
+
+    while len(new_strings_data) % 4 != 0:
+        new_strings_data.append(0)
+
+    new_strings_start = 28 + 4 * string_count
+    new_sp_size = new_strings_start + len(new_strings_data)
+    rebuilt_sp_header = struct.pack('<HHI', sp_type, sp_hsize, new_sp_size) + struct.pack('<IIIII', string_count, 0, flags, new_strings_start, 0)
+    rebuilt_offsets = b''.join(struct.pack('<I', off) for off in new_offsets)
+    new_sp = rebuilt_sp_header + rebuilt_offsets + bytes(new_strings_data)
+
+    rest_of_manifest = bytearray(manifest[header_size + sp_size:])
+
+    # 2. Patch minSdkVersion to 21 and usesCleartextTraffic to 0
+    min_sdk_idx = decoded.index('minSdkVersion') if 'minSdkVersion' in decoded else -1
+    uct_idx = decoded.index('usesCleartextTraffic') if 'usesCleartextTraffic' in decoded else -1
+
+    for pos in range(0, len(rest_of_manifest) - 20, 4):
+        ns, name, val_str, dtype, val = struct.unpack_from('<IIIII', rest_of_manifest, pos)
+        if name == min_sdk_idx and (dtype >> 24) == 0x10:
+            if val != 21:
+                struct.pack_into('<I', rest_of_manifest, pos + 16, 21)
+        elif name == uct_idx and (dtype >> 24) == 0x12:
+            struct.pack_into('<I', rest_of_manifest, pos + 16, 0)
+
+    new_file_size = header_size + len(new_sp) + len(rest_of_manifest)
+    new_header = struct.pack('<II', 0x80003, new_file_size)
+    return bytes(new_header + new_sp + bytes(rest_of_manifest))
+
+
 def patch_resources_arsc(data: bytes) -> bytes:
     """Patch resources.arsc string pool to rebrand app title and icons, and dark theme colors."""
     header_size = 12
@@ -177,11 +243,7 @@ def main():
                 ctype = zipfile.ZIP_STORED
 
             elif name == 'AndroidManifest.xml':
-                manifest = bytearray(data)
-                val = struct.unpack_from('<I', manifest, 5296)[0]
-                if val == 31:
-                    struct.pack_into('<I', manifest, 5296, 21)
-                data = bytes(manifest)
+                data = patch_manifest(data)
                 ctype = zipfile.ZIP_DEFLATED
 
             elif name == 'res/Ag.png':
@@ -323,6 +385,8 @@ def main():
 
     # Copy to all distribution destinations
     distribution_targets = [
+        r'C:\Users\ijk11\force-racing-mobile-repo\ForceRacing.apk',
+        r'C:\Users\ijk11\force-racing-mobile-repo\ForceRacing-Lite.apk',
         r'C:\Users\ijk11\Desktop\ForceRacing.apk',
         r'C:\Users\ijk11\Desktop\ForceRacing-v2.1.0.apk',
         r'C:\Users\ijk11\Desktop\forceracing-app\static\downloads\ForceRacing.apk',
